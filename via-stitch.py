@@ -6,6 +6,7 @@ import wx
 import sys
 import math
 import logging
+import random
 import kipy
 from kipy.board import Board
 from kipy.board_types import (BoardCircle, BoardPolygon, BoardRectangle,
@@ -145,10 +146,26 @@ class StitcherDialog(wx.Dialog):
         self.m_edge_clearance_text = wx.TextCtrl(panel, value="5")
         grid_sizer.Add(wx.StaticText(panel, label="Edge Clearance (mm)"), pos=(7, 0), flag=wx.ALIGN_CENTER_VERTICAL|wx.LEFT, border=5)
         grid_sizer.Add(self.m_edge_clearance_text, pos=(7, 1), flag=wx.EXPAND)
-        grid_sizer.Add(wx.StaticLine(panel), pos=(8, 0), span=(1, 2), flag=wx.EXPAND | wx.ALL, border=5)
+        
+        self.m_row_offset_text = wx.TextCtrl(panel, value="2.5")
+        grid_sizer.Add(wx.StaticText(panel, label="Row Offset (mm)"), pos=(8, 0), flag=wx.ALIGN_CENTER_VERTICAL|wx.LEFT, border=5)
+        grid_sizer.Add(self.m_row_offset_text, pos=(8, 1), flag=wx.EXPAND)
+
+        self.m_random_variance_checkbox = wx.CheckBox(panel, label="Add Random Variance")
+        grid_sizer.Add(self.m_random_variance_checkbox, pos=(9, 0), span=(1, 2), flag=wx.EXPAND | wx.TOP, border=5)
+
+        self.m_max_x_variance_text = wx.TextCtrl(panel, value="0.5")
+        grid_sizer.Add(wx.StaticText(panel, label="Max X Variance (mm)"), pos=(10, 0), flag=wx.ALIGN_CENTER_VERTICAL|wx.LEFT, border=5)
+        grid_sizer.Add(self.m_max_x_variance_text, pos=(10, 1), flag=wx.EXPAND)
+
+        self.m_max_y_variance_text = wx.TextCtrl(panel, value="0.5")
+        grid_sizer.Add(wx.StaticText(panel, label="Max Y Variance (mm)"), pos=(11, 0), flag=wx.ALIGN_CENTER_VERTICAL|wx.LEFT, border=5)
+        grid_sizer.Add(self.m_max_y_variance_text, pos=(11, 1), flag=wx.EXPAND)
+
+        grid_sizer.Add(wx.StaticLine(panel), pos=(12, 0), span=(1, 2), flag=wx.EXPAND | wx.ALL, border=5)
         self.m_net_choice = wx.Choice(panel)
-        grid_sizer.Add(wx.StaticText(panel, label="Assign to Net"), pos=(9, 0), flag=wx.ALIGN_CENTER_VERTICAL|wx.LEFT, border=5)
-        grid_sizer.Add(self.m_net_choice, pos=(9, 1), flag=wx.EXPAND)
+        grid_sizer.Add(wx.StaticText(panel, label="Assign to Net"), pos=(13, 0), flag=wx.ALIGN_CENTER_VERTICAL|wx.LEFT, border=5)
+        grid_sizer.Add(self.m_net_choice, pos=(13, 1), flag=wx.EXPAND)
         grid_sizer.AddGrowableCol(1)
         panel.SetSizer(grid_sizer)
         top_sizer.Add(panel, 1, wx.EXPAND | wx.ALL, border=5)
@@ -162,11 +179,18 @@ class StitcherDialog(wx.Dialog):
         top_sizer.Add(button_sizer, 0, wx.ALIGN_RIGHT | wx.ALL, border=10)
         self.SetSizerAndFit(top_sizer)
         self.Bind(wx.EVT_RADIOBOX, self.on_sizing_mode_change, self.m_sizing_mode)
+        self.Bind(wx.EVT_CHECKBOX, self.on_random_variance_change, self.m_random_variance_checkbox)
         self.Bind(wx.EVT_BUTTON, self.on_stitch, self.m_stitch_button)
         self.m_stitch_button.Disable()
         self.populate_data()
         self.on_sizing_mode_change(None)
+        self.on_random_variance_change(None)
         self.Center()
+
+    def on_random_variance_change(self, event):
+        is_random = self.m_random_variance_checkbox.GetValue()
+        self.m_max_x_variance_text.Enable(is_random)
+        self.m_max_y_variance_text.Enable(is_random)
 
     def on_sizing_mode_change(self, event):
         is_manual = self.m_sizing_mode.GetSelection() == 0
@@ -200,7 +224,11 @@ class StitcherDialog(wx.Dialog):
             params = {
                 'spacing': float(self.m_spacing_text.GetValue()), 'clearance': float(self.m_clearance_text.GetValue()),
                 'edge_clearance': float(self.m_edge_clearance_text.GetValue()),
-                'net_name': self.m_net_choice.GetStringSelection() if self.m_net_choice.GetSelection() > 0 else None
+                'net_name': self.m_net_choice.GetStringSelection() if self.m_net_choice.GetSelection() > 0 else None,
+                'row_offset': float(self.m_row_offset_text.GetValue()),
+                'random_variance': self.m_random_variance_checkbox.GetValue(),
+                'max_x_variance': float(self.m_max_x_variance_text.GetValue()),
+                'max_y_variance': float(self.m_max_y_variance_text.GetValue())
             }
             if self.m_sizing_mode.GetSelection() == 0:
                 params.update({'via_size': float(self.m_via_size_text.GetValue()), 'drill_size': float(self.m_drill_size_text.GetValue()), 'netclass_name': None})
@@ -236,6 +264,10 @@ class StitcherDialog(wx.Dialog):
         spacing_nm = from_mm(params['spacing'])
         edge_clearance_nm = from_mm(params['edge_clearance'])
         clearance_nm = from_mm(params['clearance'])
+        row_offset_nm = from_mm(params['row_offset'])
+        random_variance = params['random_variance']
+        max_x_variance_nm = from_mm(params['max_x_variance'])
+        max_y_variance_nm = from_mm(params['max_y_variance'])
         via_radius_nm = via_size_nm / 2.0
         
         outline_shapes = [s for s in self.board.get_shapes() if s.layer == BoardLayer.BL_Edge_Cuts]
@@ -278,8 +310,16 @@ class StitcherDialog(wx.Dialog):
         half_cols = int(bbox.size.x / (2.0 * spacing_nm)) if spacing_nm > 0 else 0
         half_rows = int(bbox.size.y / (2.0 * spacing_nm)) if spacing_nm > 0 else 0
         for i in range(-half_rows, half_rows + 1):
+            row_x_offset = row_offset_nm if i % 2 != 0 else 0
             for j in range(-half_cols, half_cols + 1):
-                pos = Vector2.from_xy(int(center.x + j * spacing_nm), int(center.y + i * spacing_nm))
+                x_pos = center.x + j * spacing_nm + row_x_offset
+                y_pos = center.y + i * spacing_nm
+
+                if random_variance:
+                    x_pos += random.uniform(-max_x_variance_nm, max_x_variance_nm)
+                    y_pos += random.uniform(-max_y_variance_nm, max_y_variance_nm)
+
+                pos = Vector2.from_xy(int(x_pos), int(y_pos))
                 if not is_point_inside_outline(pos, outline_segments): continue
                 if min(point_segment_distance(pos, s, e) for s, e in outline_segments) < via_radius_nm + edge_clearance_nm: continue
                 candidate_positions.append(pos)
