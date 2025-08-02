@@ -31,7 +31,6 @@ def get_outline_segments(board: Board, shapes: List[BoardShape]) -> List[Tuple[V
                     segments.append((points[i], points[(i + 1) % len(points)]))
         
         elif isinstance(shape, BoardRectangle):
-            # Use the item's bounding box, which is the most reliable way to get its geometry.
             bbox = board.get_item_bounding_box(shape)
             if bbox:
                 p1 = bbox.pos
@@ -46,7 +45,6 @@ def get_outline_segments(board: Board, shapes: List[BoardShape]) -> List[Tuple[V
             segments.append((shape.start, shape.end))
 
         elif isinstance(shape, BoardCircle):
-            # Approximate circle by getting its bounding box to find center and radius.
             bbox = board.get_item_bounding_box(shape)
             if bbox:
                 center = bbox.center()
@@ -82,11 +80,9 @@ def get_enclosing_bbox(board: Board, shapes: List[BoardShape]) -> Box2 | None:
     max_x = max(b.pos.x + b.size.x for b in valid_bboxes)
     max_y = max(b.pos.y + b.size.y for b in valid_bboxes)
     
-    # Create the kipy wrapper objects
     position_wrapper = Vector2.from_xy(min_x, min_y)
     size_wrapper = Vector2.from_xy(max_x - min_x, max_y - min_y)
     
-    # FIX: Pass the underlying .proto attribute to the Box2 constructor
     return Box2(position_wrapper.proto, size_wrapper.proto)
 
 
@@ -126,8 +122,11 @@ def main():
     parser.add_argument("--drill-size", type=float, required=True, help="Diameter of the via drill hole in mm.")
     parser.add_argument("--spacing", type=float, required=True, help="Spacing between vias in mm.")
     parser.add_argument("--clearance", type=float, required=True, help="Minimum clearance from the new via pad edge to other copper objects, in mm.")
-    # Optional arguments
-    parser.add_argument("--net-class", type=str, help="The net class to assign to the vias. If not found, vias will have no net.")
+    
+    # --- MODIFIED ARGUMENT ---
+    # Optional argument to specify net by name
+    parser.add_argument("--net", type=str, help="The name of the net to assign to the vias (e.g., 'GND'). If not found, vias will have no net.")
+    
     parser.add_argument("--edge-clearance", type=float, default=0.5, help="Minimum clearance from the board edge to the via pad edge, in mm. Default is 0.5mm.")
 
     args = parser.parse_args()
@@ -146,7 +145,6 @@ def main():
         print(f"Error: Could not connect to KiCad. {e}", file=sys.stderr)
         sys.exit(1)
 
-    # --- Identify Board Outline from all relevant shapes on Edge.Cuts ---
     outline_shapes = [
         s for s in board.get_shapes()
         if s.layer == BoardLayer.BL_Edge_Cuts and isinstance(s, (BoardPolygon, BoardRectangle, BoardSegment, BoardCircle))
@@ -167,16 +165,18 @@ def main():
         sys.exit(1)
     print(f"INFO: Calculated tiling bounding box: {bbox}")
 
+    # --- MODIFIED NET LOGIC ---
     target_net = None
-    if args.net_class:
-        nets_in_class = board.get_nets(netclass_filter=args.net_class)
-        if nets_in_class:
-            target_net = nets_in_class[0]
+    if args.net:
+        # Find the specified net by name
+        all_nets = board.get_nets()
+        target_net = next((n for n in all_nets if n.name == args.net), None)
+        
+        if target_net:
             print(f"INFO: Found target net: {target_net.name}")
         else:
-            print(f"Warning: No nets in class '{args.net_class}'. Vias will have no net.", file=sys.stderr)
+            print(f"Warning: Net '{args.net}' not found. Vias will have no net.", file=sys.stderr)
             
-    # --- Cache Obstacles for Collision Detection ---
     print("INFO: Caching board objects for collision detection...")
     obstacles = { 'pads': [], 'tracks': [], 'vias': [] }
     for fp in board.get_footprints():
@@ -185,7 +185,6 @@ def main():
     obstacles['vias'].extend(board.get_vias())
     print(f"INFO: Cached {len(obstacles['pads'])} pads, {len(obstacles['tracks'])} tracks, and {len(obstacles['vias'])} vias.")
 
-    # --- Generate Via Grid ---
     vias_to_create = []
     center = bbox.center()
     
@@ -239,7 +238,8 @@ def main():
 
                 via = Via()
                 via.position = pos
-                if target_net: via.net = target_net
+                if target_net:
+                    via.net = target_net
                 via.diameter = via_size_nm
                 via.drill_diameter = drill_size_nm
                 vias_to_create.append(via)
@@ -250,8 +250,12 @@ def main():
 
     commit = board.begin_commit()
     board.create_items(vias_to_create)
+
+    # --- MODIFIED COMMIT MESSAGE ---
     commit_msg = f"Add {len(vias_to_create)} stitching vias"
-    if target_net: commit_msg += f" to {args.net_class}"
+    if target_net:
+        commit_msg += f" to net {args.net}"
+        
     board.push_commit(commit, commit_msg)
 
     print(f"✅ Successfully created {len(vias_to_create)} stitching vias.")
