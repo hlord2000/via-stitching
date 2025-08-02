@@ -115,28 +115,27 @@ def point_segment_distance(p: Vector2, a: Vector2, b: Vector2) -> float:
 def main():
     """Main function to run the via stitching script."""
     parser = argparse.ArgumentParser(
-        description="Perform via stitching with collision avoidance."
+        description="Perform via stitching with collision avoidance. Provide either manual via dimensions or use a netclass.",
+        formatter_class=argparse.RawTextHelpFormatter
     )
-    # Required arguments
-    parser.add_argument("--via-size", type=float, required=True, help="Diameter of the via pad in mm.")
-    parser.add_argument("--drill-size", type=float, required=True, help="Diameter of the via drill hole in mm.")
+    
+    # --- MODIFIED ARGUMENTS ---
+    # Group for manual sizing
+    manual_group = parser.add_argument_group('Manual Sizing (specify both)')
+    manual_group.add_argument("--via-size", type=float, help="Diameter of the via pad in mm.")
+    manual_group.add_argument("--drill-size", type=float, help="Diameter of the via drill hole in mm.")
+
+    # Group for netclass-based sizing
+    netclass_group = parser.add_argument_group('Netclass Sizing (used if manual sizing is omitted)')
+    netclass_group.add_argument("--netclass", type=str, help="Netclass to get via dimensions from. Defaults to 'Default'.")
+
+    # General arguments
     parser.add_argument("--spacing", type=float, required=True, help="Spacing between vias in mm.")
     parser.add_argument("--clearance", type=float, required=True, help="Minimum clearance from the new via pad edge to other copper objects, in mm.")
-    
-    # --- MODIFIED ARGUMENT ---
-    # Optional argument to specify net by name
-    parser.add_argument("--net", type=str, help="The name of the net to assign to the vias (e.g., 'GND'). If not found, vias will have no net.")
-    
+    parser.add_argument("--net", type=str, help="The name of the net to assign to the vias (e.g., 'GND').")
     parser.add_argument("--edge-clearance", type=float, default=0.5, help="Minimum clearance from the board edge to the via pad edge, in mm. Default is 0.5mm.")
 
     args = parser.parse_args()
-
-    via_size_nm = from_mm(args.via_size)
-    drill_size_nm = from_mm(args.drill_size)
-    spacing_nm = from_mm(args.spacing)
-    edge_clearance_nm = from_mm(args.edge_clearance)
-    clearance_nm = from_mm(args.clearance)
-    via_radius_nm = via_size_nm / 2.0
 
     try:
         kicad = kipy.KiCad()
@@ -144,6 +143,47 @@ def main():
     except (ApiError, FileNotFoundError) as e:
         print(f"Error: Could not connect to KiCad. {e}", file=sys.stderr)
         sys.exit(1)
+
+    # --- DETERMINE VIA PROPERTIES (MANUAL VS NETCLASS) ---
+    if args.via_size is not None and args.drill_size is not None:
+        # Manual Mode
+        print("INFO: Using manually specified via dimensions.")
+        if args.netclass:
+            print("Warning: --netclass argument is ignored when --via-size and --drill-size are specified.", file=sys.stderr)
+        via_size_nm = from_mm(args.via_size)
+        drill_size_nm = from_mm(args.drill_size)
+    elif args.via_size is None and args.drill_size is None:
+        # Netclass Mode
+        target_netclass_name = args.netclass if args.netclass else "Default"
+        print(f"INFO: Using via dimensions from netclass '{target_netclass_name}'.")
+        
+        # Find the NetClass object by finding a net within it first
+        nets_in_class = board.get_nets(netclass_filter=target_netclass_name)
+        if not nets_in_class:
+            print(f"Error: Netclass '{target_netclass_name}' not found or contains no nets. Cannot determine via dimensions.", file=sys.stderr)
+            sys.exit(1)
+
+        netclass_map = board.get_netclass_for_nets(nets_in_class[0])
+        netclass_obj = list(netclass_map.values())[0]
+
+        # Get dimensions from the NetClass object
+        via_size_nm = netclass_obj.via_diameter
+        drill_size_nm = netclass_obj.via_drill
+        
+        if not via_size_nm or not drill_size_nm:
+            print(f"Error: Netclass '{target_netclass_name}' does not have valid via dimensions defined (via size or drill size is zero).", file=sys.stderr)
+            sys.exit(1)
+        
+        print(f"INFO: From netclass: Via Diameter = {via_size_nm / 1e6:.2f}mm, Drill = {drill_size_nm / 1e6:.2f}mm")
+    else:
+        # Ambiguous state where only one of the size/drill arguments was given
+        print("Error: You must specify both --via-size and --drill-size, or neither (to use netclass properties).", file=sys.stderr)
+        sys.exit(1)
+
+    spacing_nm = from_mm(args.spacing)
+    edge_clearance_nm = from_mm(args.edge_clearance)
+    clearance_nm = from_mm(args.clearance)
+    via_radius_nm = via_size_nm / 2.0
 
     outline_shapes = [
         s for s in board.get_shapes()
@@ -165,13 +205,10 @@ def main():
         sys.exit(1)
     print(f"INFO: Calculated tiling bounding box: {bbox}")
 
-    # --- MODIFIED NET LOGIC ---
     target_net = None
     if args.net:
-        # Find the specified net by name
         all_nets = board.get_nets()
         target_net = next((n for n in all_nets if n.name == args.net), None)
-        
         if target_net:
             print(f"INFO: Found target net: {target_net.name}")
         else:
@@ -251,7 +288,6 @@ def main():
     commit = board.begin_commit()
     board.create_items(vias_to_create)
 
-    # --- MODIFIED COMMIT MESSAGE ---
     commit_msg = f"Add {len(vias_to_create)} stitching vias"
     if target_net:
         commit_msg += f" to net {args.net}"
