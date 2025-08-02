@@ -3,30 +3,105 @@
 import argparse
 import math
 import sys
-from typing import List
+from typing import List, Tuple
 
 import kipy
-from kipy.board_types import BoardPolygon, Pad, Track, Via
+from kipy.board import Board
+from kipy.board_types import (BoardCircle, BoardPolygon, BoardRectangle,
+                             BoardSegment, BoardShape, Pad, Track, Via)
 from kipy.errors import ApiError
 from kipy.geometry import Box2, Vector2
 from kipy.util import from_mm
 from kipy.util.board_layer import BoardLayer
 
 
-def get_polygon_area(polygon: BoardPolygon) -> float:
-    """Calculates the area of a BoardPolygon using the shoelace formula."""
-    if not polygon.polygons or not polygon.polygons[0].outline.nodes:
-        return 0.0
-    points = [node.point for node in polygon.polygons[0].outline if node.has_point]
-    if len(points) < 3:
-        return 0.0
-    n = len(points)
-    area = 0.0
-    for i in range(n):
-        j = (i + 1) % n
-        area += points[i].x * points[j].y
-        area -= points[j].x * points[i].y
-    return abs(area) / 2.0
+def get_outline_segments(board: Board, shapes: List[BoardShape]) -> List[Tuple[Vector2, Vector2]]:
+    """
+    Extracts all line segments from a list of board shapes.
+    Uses get_item_bounding_box for reliable geometry of rectangles and circles.
+    """
+    segments = []
+    for shape in shapes:
+        if isinstance(shape, BoardPolygon):
+            if not shape.polygons or not shape.polygons[0].outline.nodes:
+                continue
+            points = [node.point for node in shape.polygons[0].outline if node.has_point]
+            if len(points) >= 2:
+                for i in range(len(points)):
+                    segments.append((points[i], points[(i + 1) % len(points)]))
+        
+        elif isinstance(shape, BoardRectangle):
+            # Use the item's bounding box, which is the most reliable way to get its geometry.
+            bbox = board.get_item_bounding_box(shape)
+            if bbox:
+                p1 = bbox.pos
+                p3 = Vector2.from_xy(bbox.pos.x + bbox.size.x, bbox.pos.y + bbox.size.y)
+                p2 = Vector2.from_xy(p3.x, p1.y)
+                p4 = Vector2.from_xy(p1.x, p3.y)
+                segments.extend([(p1, p2), (p2, p3), (p3, p4), (p4, p1)])
+            else:
+                 print(f"Warning: Could not get bounding box for a BoardRectangle on Edge.Cuts. Skipping.", file=sys.stderr)
+
+        elif isinstance(shape, BoardSegment):
+            segments.append((shape.start, shape.end))
+
+        elif isinstance(shape, BoardCircle):
+            # Approximate circle by getting its bounding box to find center and radius.
+            bbox = board.get_item_bounding_box(shape)
+            if bbox:
+                center = bbox.center()
+                radius = bbox.size.x / 2.0
+                num_segments = 64
+                points = []
+                for i in range(num_segments):
+                    angle = 2 * math.pi * i / num_segments
+                    x = center.x + radius * math.cos(angle)
+                    y = center.y + radius * math.sin(angle)
+                    points.append(Vector2.from_xy(int(x), int(y)))
+                
+                for i in range(num_segments):
+                    segments.append((points[i], points[(i + 1) % num_segments]))
+            else:
+                print(f"Warning: Could not get bounding box for a BoardCircle on Edge.Cuts. Skipping.", file=sys.stderr)
+
+    return segments
+
+
+def get_enclosing_bbox(board: Board, shapes: List[BoardShape]) -> Box2 | None:
+    """Calculates the single bounding box that encloses a list of shapes."""
+    if not shapes:
+        return None
+    
+    bboxes = board.get_item_bounding_box(shapes)
+    valid_bboxes = [b for b in bboxes if b]
+    if not valid_bboxes:
+        return None
+
+    min_x = min(b.pos.x for b in valid_bboxes)
+    min_y = min(b.pos.y for b in valid_bboxes)
+    max_x = max(b.pos.x + b.size.x for b in valid_bboxes)
+    max_y = max(b.pos.y + b.size.y for b in valid_bboxes)
+    
+    # Create the kipy wrapper objects
+    position_wrapper = Vector2.from_xy(min_x, min_y)
+    size_wrapper = Vector2.from_xy(max_x - min_x, max_y - min_y)
+    
+    # FIX: Pass the underlying .proto attribute to the Box2 constructor
+    return Box2(position_wrapper.proto, size_wrapper.proto)
+
+
+def is_point_inside_outline(point: Vector2, segments: List[Tuple[Vector2, Vector2]]) -> bool:
+    """
+    Determines if a point is inside a shape defined by segments using the Ray Casting algorithm.
+    """
+    intersections = 0
+    for start, end in segments:
+        if start.y == end.y: continue
+        if min(start.y, end.y) < point.y <= max(start.y, end.y):
+            x_intersect = (point.y - start.y) * (end.x - start.x) / (end.y - start.y) + start.x
+            if x_intersect > point.x:
+                intersections += 1
+    return intersections % 2 == 1
 
 
 def point_segment_distance(p: Vector2, a: Vector2, b: Vector2) -> float:
@@ -71,15 +146,26 @@ def main():
         print(f"Error: Could not connect to KiCad. {e}", file=sys.stderr)
         sys.exit(1)
 
-    outline_poly = max(
-        (s for s in board.get_shapes() if isinstance(s, BoardPolygon) and s.layer == BoardLayer.BL_Edge_Cuts),
-        key=get_polygon_area,
-        default=None,
-    )
-    if not outline_poly:
-        print("Error: No BoardPolygon found on Edge.Cuts layer.", file=sys.stderr)
+    # --- Identify Board Outline from all relevant shapes on Edge.Cuts ---
+    outline_shapes = [
+        s for s in board.get_shapes()
+        if s.layer == BoardLayer.BL_Edge_Cuts and isinstance(s, (BoardPolygon, BoardRectangle, BoardSegment, BoardCircle))
+    ]
+    if not outline_shapes:
+        print("Error: No Polygons, Rectangles, Segments, or Circles found on Edge.Cuts layer.", file=sys.stderr)
         sys.exit(1)
-    print("INFO: Selected the largest polygon as the main outline.")
+    print(f"INFO: Found {len(outline_shapes)} shapes on Edge.Cuts to define board outline.")
+
+    outline_segments = get_outline_segments(board, outline_shapes)
+    if not outline_segments:
+        print("Error: Could not extract any line segments from the Edge.Cuts shapes.", file=sys.stderr)
+        sys.exit(1)
+
+    bbox = get_enclosing_bbox(board, outline_shapes)
+    if not bbox:
+        print("Error: Could not determine bounding box of the outline shapes.", file=sys.stderr)
+        sys.exit(1)
+    print(f"INFO: Calculated tiling bounding box: {bbox}")
 
     target_net = None
     if args.net_class:
@@ -89,13 +175,7 @@ def main():
             print(f"INFO: Found target net: {target_net.name}")
         else:
             print(f"Warning: No nets in class '{args.net_class}'. Vias will have no net.", file=sys.stderr)
-
-    bbox = board.get_item_bounding_box(outline_poly)
-    if not bbox:
-        print("Error: Could not determine bounding box of the outline polygon.", file=sys.stderr)
-        sys.exit(1)
-    print(f"INFO: Calculated tiling bounding box: {bbox}")
-
+            
     # --- Cache Obstacles for Collision Detection ---
     print("INFO: Caching board objects for collision detection...")
     obstacles = { 'pads': [], 'tracks': [], 'vias': [] }
@@ -109,11 +189,11 @@ def main():
     vias_to_create = []
     center = bbox.center()
     
-    safe_bbox_width = bbox.size.x - 2 * edge_clearance_nm
-    safe_bbox_height = bbox.size.y - 2 * edge_clearance_nm
+    safe_bbox_width = bbox.size.x
+    safe_bbox_height = bbox.size.y
 
     if safe_bbox_width < via_size_nm or safe_bbox_height < via_size_nm:
-        print("Warning: Board area is too small for via size and edge clearance.", file=sys.stderr)
+        print("Warning: Board area is too small for via size.", file=sys.stderr)
     else:
         half_cols = int(safe_bbox_width / (2.0 * spacing_nm))
         half_rows = int(safe_bbox_height / (2.0 * spacing_nm))
@@ -122,38 +202,32 @@ def main():
         for i in range(-half_rows, half_rows + 1):
             for j in range(-half_cols, half_cols + 1):
                 pos = Vector2.from_xy(int(center.x + j * spacing_nm), int(center.y + i * spacing_nm))
-                is_valid = True
-
-                # 1. Check Edge Clearance
-                if not (pos.x - via_radius_nm >= bbox.pos.x + edge_clearance_nm and
-                        pos.x + via_radius_nm <= bbox.pos.x + bbox.size.x - edge_clearance_nm and
-                        pos.y - via_radius_nm >= bbox.pos.y + edge_clearance_nm and
-                        pos.y + via_radius_nm <= bbox.pos.y + bbox.size.y - edge_clearance_nm):
+                
+                if not is_point_inside_outline(pos, outline_segments):
                     continue
 
-                # 2. Check Collision with other objects
-                # Vias (distance check)
+                min_dist_to_edge = min(point_segment_distance(pos, start, end) for start, end in outline_segments)
+                if min_dist_to_edge < via_radius_nm + edge_clearance_nm:
+                    continue
+                
+                is_valid = True
                 for v in obstacles['vias']:
                     if (target_net and v.net == target_net): continue
                     if (pos - v.position).length() < via_radius_nm + (v.diameter / 2.0) + clearance_nm:
                         is_valid = False; break
                 if not is_valid: continue
 
-                # Tracks (distance check)
                 for t in obstacles['tracks']:
                     if (target_net and t.net == target_net): continue
                     if point_segment_distance(pos, t.start, t.end) < via_radius_nm + (t.width / 2.0) + clearance_nm:
                         is_valid = False; break
                 if not is_valid: continue
 
-                # Pads (hit_test check)
                 clearance_radius_int = int(clearance_radius)
                 test_points = [
                     pos,
-                    pos + Vector2.from_xy(0, clearance_radius_int),
-                    pos + Vector2.from_xy(0, -clearance_radius_int),
-                    pos + Vector2.from_xy(-clearance_radius_int, 0),
-                    pos + Vector2.from_xy(clearance_radius_int, 0)
+                    pos + Vector2.from_xy(0, clearance_radius_int), pos + Vector2.from_xy(0, -clearance_radius_int),
+                    pos + Vector2.from_xy(-clearance_radius_int, 0), pos + Vector2.from_xy(clearance_radius_int, 0)
                 ]
                 for p in obstacles['pads']:
                     if (target_net and p.net == target_net): continue
@@ -163,7 +237,6 @@ def main():
                     if not is_valid: break
                 if not is_valid: continue
 
-                # If all checks pass, create the via
                 via = Via()
                 via.position = pos
                 if target_net: via.net = target_net
@@ -175,7 +248,6 @@ def main():
         print("ERROR: No valid positions found for vias. Nothing to do.", file=sys.stderr)
         return
 
-    # Create vias in a single transaction
     commit = board.begin_commit()
     board.create_items(vias_to_create)
     commit_msg = f"Add {len(vias_to_create)} stitching vias"
@@ -183,6 +255,7 @@ def main():
     board.push_commit(commit, commit_msg)
 
     print(f"✅ Successfully created {len(vias_to_create)} stitching vias.")
+
 
 if __name__ == "__main__":
     main()
