@@ -1,0 +1,25 @@
+{
+    "$schema": "https://go.kicad.org/api/schemas/v1",
+    "identifier": "com.github.hlord2000.via-stitching",
+    "name": "via-stitching",
+    "description": "Via stitching",
+    "runtime": {
+        "type": "python",
+        "min_version": "3.9"
+    },
+    "actions": [
+        {
+            "identifier": "via-stitch",
+            "name": "Via Stitching",
+            "description": "Add via stitching to entire board",
+            "show-button": true,
+            "scopes": [
+                "pcb"
+            ],
+            "entrypoint": "via-stitch.py",
+            "icons-light": [
+                "icon.png"
+            ]
+        }
+    ]
+}
