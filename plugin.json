@@ -16,7 +16,24 @@
             "scopes": [
                 "pcb"
             ],
+<<<<<<< HEAD:plugins/plugin.json
+            "entrypoint": "via_stitch_action.py",
+            "icons-light": [
+                "icon.png"
+            ]
+        },
+        {
+            "identifier": "via-fence",
+            "name": "Via Fencing",
+            "description": "Add a via fence around traces or along lines",
+            "show-button": true,
+            "scopes": [
+                "pcb"
+            ],
+            "entrypoint": "via_fence_action.py",
+=======
             "entrypoint": "via-stitch.py",
+>>>>>>> parent of 8f89e6f (Added via fencing, initial implementation):plugin.json
             "icons-light": [
                 "icon.png"
             ]

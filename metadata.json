@@ -1,0 +1,44 @@
+{
+  "$schema": "https://go.kicad.org/pcm/schemas/v1",
+  "name": "Board2Pdf",
+  "description": "Export a customized pdf of the board",
+  "description_full": "Each enabled template will result in a page in the pdf file that's created by this plugin. You can enable any number of templates to get different views and color modes of the pcb. Each template can be individually configured to give the desired output. It's completely up to you which layers to show, and which colors the layers shall have.",
+  "identifier": "com.gitlab.dennevi.Board2Pdf",
+  "type": "plugin",
+  "author": {
+    "name": "Albin Dennevi",
+    "contact": {
+      "support": "https://forum.kicad.info/"
+    }
+  },
+  "maintainer": {
+    "name": "Albin Dennevi",
+    "contact": {
+      "support": "https://forum.kicad.info/"
+    }
+  },
+  "resources": {
+    "Gitlab": "https://gitlab.com/dennevi/Board2Pdf",
+    "Readme": "https://gitlab.com/dennevi/Board2Pdf/-/blob/main/README.md",
+    "Wiki": "http://board2pdf.dennevi.com"
+  },
+  "license": "GPL-3.0",
+  "tags": [
+    "pcbnew",
+    "assembly",
+    "documentation"
+  ],
+  "versions": [
+    {
+      "version": "2.0.0",
+      "status": "development",
+      "kicad_version": "9.0.0",
+      "platforms": [
+        "linux",
+        "macos",
+        "windows"
+      ],
+	  "runtime": "ipc"
+    }
+  ]
+}
